@@ -11,9 +11,6 @@ using TwitchLib.Api;
 using TwitchLib.Api.Interfaces;
 using TwitchLib.PubSub;
 using TwitchLib.Api.V5.Models.Channels;
-using ConsoleApp1.ChatCommands;
-using ConsoleApp1.FunThings;
-
 using TwitchLib.Api.Helix.Models.Users;
 using TwitchLib.Api.Helix;
 
@@ -21,20 +18,19 @@ namespace AlloouBot
 {
     internal class TwitchChatBot
     {
+        //implement SQLite
+
         readonly TwitchClient client = new TwitchClient();
         readonly JoinedChannel JoinedChannel = new JoinedChannel(TwitchInfo.ChannelName);
         readonly ConnectionCredentials twitchCredentials = new ConnectionCredentials(TwitchInfo.BotName, TwitchInfo.BotAccessToken);
         readonly TwitchPubSub pubSub = new TwitchPubSub();
         private TwitchAPI twitchAPI = new TwitchAPI();
+        private ChatCommands _chatCommands = new ChatCommands();
         
-        private ushort _viewerCount = 0; // 16-bit int
-        private List<string> _currentViewers = new List<string>();
-        private List<string> _allViewers = new List<string>();
-        private List<string> _newFollowers = new List<string>();
         private char _chatCommandIdentifier = '!';
         
         private readonly List<string> moderators = new List<string>
-        { "...", "???", "!!!" };
+        { "...", "!!!", "???" };
 
         #region Bits and Currency Costs
         private float _bitsToUSDConverter = 1.4f; // UPDATED: November 2018. current exchange rate for 1 dollar to 100 bits
@@ -52,9 +48,11 @@ namespace AlloouBot
 
             twitchAPI.Settings.ClientId = TwitchInfo.ClientId;
             twitchAPI.Settings.AccessToken = TwitchInfo.BotAccessToken;
-            twitchAPI.Settings.Secret = "TwitchyTriggerFinger";
-            //twitchAPI.Helix.Webhooks.UserReceivesFollowerAsync("What do I type here???", TwitchLib.Api.Core.Enums.WebhookCallMode.Subscribe, TwitchInfo.ClientId); // I'm not doing something right
-            ChatCommands.SetCommandIdentifier(_chatCommandIdentifier);
+            twitchAPI.Settings.Secret = "Twitch"; // Need to not hard code this
+
+            _chatCommands.SetCommandIdentifier(_chatCommandIdentifier);
+            _chatCommands.twitchAPI = twitchAPI;
+            TwitchHelpers.TwitchAPI = twitchAPI;
 
             client.OnLog += Client_OnLog;
             client.OnConnectionError += Client_OnConnectionError;
@@ -92,7 +90,7 @@ namespace AlloouBot
             Console.WriteLine("Disconnecting...");
             client.SendMessage(JoinedChannel, "The plug has been pulled. My time is up. Until next time. ResidentSleeper");
 
-            client.OnConnectionError -= Client_OnConnectionError; // will complain of a fatal network error. Is this something to fix?
+            client.OnConnectionError -= Client_OnConnectionError; // will complain of a fatal network error if not disconnected. Is this something to fix?
             client.LeaveChannel(JoinedChannel.Channel);
 
             pubSub.Disconnect();
@@ -102,8 +100,8 @@ namespace AlloouBot
         #region PubSub Events
         private void PubSub_OnPubSubServiceConnected(object sender, EventArgs e)
         {
-            pubSub.ListenToFollows(GetUserId(TwitchInfo.ChannelName));
-            pubSub.ListenToBitsEvents(GetUserId(TwitchInfo.ChannelName));
+            pubSub.ListenToFollows(TwitchHelpers.GetUserId(TwitchInfo.ChannelName));
+            pubSub.ListenToBitsEvents(TwitchHelpers.GetUserId(TwitchInfo.ChannelName));
         }
 
         private void PubSub_OnListenResponse(object sender, TwitchLib.PubSub.Events.OnListenResponseArgs e)
@@ -116,7 +114,7 @@ namespace AlloouBot
 
         private void PubSub_OnFollow(object sender, TwitchLib.PubSub.Events.OnFollowArgs e)
         {
-            _newFollowers.Add(e.Username);
+            Measurables.newFollowers.Add(e.Username);
             client.SendMessage(JoinedChannel.Channel, string.Format("Thanks for the follow, {0}!", e.Username));
         }
 
@@ -185,7 +183,11 @@ namespace AlloouBot
 
             if(e.ChatMessage.Message.StartsWith(_chatCommandIdentifier.ToString())) // if it is a command
             {
-                DoChatCommand(e.ChatMessage.Message, e.ChatMessage.Username);
+                if (moderators.Contains(e.ChatMessage.Username, StringComparer.InvariantCultureIgnoreCase))
+                    client.SendMessage(JoinedChannel, _chatCommands.DoChatCommand(e, true));
+                else
+                    client.SendMessage(JoinedChannel, _chatCommands.DoChatCommand(e, false));
+
             }
         }
 
@@ -207,18 +209,18 @@ namespace AlloouBot
 
         private void Client_OnUserJoined(object sender, OnUserJoinedArgs e)
         {
-            if(!_allViewers.Contains(e.Username))
+            if(!Measurables.allViewers.Contains(e.Username))
             {
-                _allViewers.Add(e.Username);
+                Measurables.allViewers.Add(e.Username);
             }
-            _currentViewers.Add(e.Username);
-            _viewerCount++;
+            Measurables.currentViewers.Add(e.Username);
+            Measurables.viewerCount++;
         }
 
         private void Client_OnUserLeft(object sender, OnUserLeftArgs e)
         {
-            _currentViewers.Remove(e.Username);
-            _viewerCount--;
+            Measurables.currentViewers.Remove(e.Username);
+            Measurables.viewerCount--;
         }
 
         private void Client_OnUserTimedout(object sender, OnUserTimedoutArgs e)
@@ -247,215 +249,6 @@ namespace AlloouBot
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("Successfully disconnected!");
             Console.ForegroundColor = ConsoleColor.Gray;
-        }
-        #endregion
-
-        #region Private Functions
-        private TimeSpan? GetUpTime()
-        {
-            string userId = GetUserId(TwitchInfo.ChannelName);
-
-            if (userId == null || string.IsNullOrEmpty(userId))
-                return null;
-
-            return twitchAPI.V5.Streams.GetUptimeAsync(userId).Result;
-        }
-
-        private string GetUserId(string userName)
-        {
-            List<string> list = new List<string>() { userName };
-            User[] users = twitchAPI.Helix.Users.GetUsersAsync(null, list).Result.Users;
-
-            if (users == null || users.Length == 0)
-                return null;
-
-            return users[0].Id;
-        }
-
-        private User GetUser(string userName)
-        {
-            if (userName == string.Empty)
-                return null;
-
-            List<string> list = new List<string>() { userName };
-            User[] users = twitchAPI.Helix.Users.GetUsersAsync(null, list).Result.Users;
-
-            if (users == null || users.Length == 0)
-                return null;
-
-            return users[0];
-        }
-
-        /// <summary>
-        /// used to form a comma delimited string of the followers gained this session.
-        /// </summary>
-        /// <returns></returns>
-        private string GetRecentFollowers()
-        {
-            string sReturn = string.Empty;
-
-            foreach(string s in _newFollowers)
-            {
-                sReturn += s + ", ";
-            }
-            if (!string.IsNullOrEmpty(sReturn))
-                sReturn.TrimEnd(new Char[] { ' ', ',' });
-
-            return sReturn;
-        }
-
-        /// <summary>
-        /// used to form a comma delimited string of the viewers currently in the channel
-        /// </summary>
-        /// <returns></returns>
-        private string GetCurrentViewers()
-        {
-            string sReturn = string.Empty;
-
-            foreach (string s in _currentViewers)
-            {
-                sReturn += s + ", ";
-            }
-            if (!string.IsNullOrEmpty(sReturn))
-                sReturn.TrimEnd(new Char[] { ' ', ',' });
-
-            return sReturn;
-        }
-
-        /// <summary>
-        /// used to form a comma delimited string of all viewers who came in during this session
-        /// </summary>
-        /// <returns></returns>
-        private string GetAllViewers()
-        {
-            string sReturn = string.Empty;
-
-            foreach (string s in _allViewers)
-            {
-                sReturn += s + ", ";
-            }
-            if (!string.IsNullOrEmpty(sReturn))
-                sReturn.TrimEnd(new Char[] { ' ', ',' });
-
-            return sReturn;
-        }
-
-        private Channel GetChannel(string userName)
-        {
-            string userId = GetUserId(userName);
-
-            if (!string.IsNullOrEmpty(userId))
-            {
-                Channel channel = twitchAPI.V5.Channels.GetChannelByIDAsync(GetUserId(userName)).Result;
-                if (channel != null)
-                    return channel;
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// Used to praise a hosting / raiding streamer
-        /// </summary>
-        /// <param name="userName"></param>
-        /// <returns></returns>
-        private string PraiseMessage(string userName)
-        {
-            Channel channel = GetChannel(userName);
-
-            string sReturn = string.Empty;
-            if (channel != null)
-            {
-                if(channel.Game != null)
-                    sReturn = string.Format("Please give {0} a follow. They were playing {1}! \n {1}", channel.Name, channel.Game, channel.Url);
-                else
-                    sReturn = string.Format("Please give {0} a follow. \n {1}", channel.Name, channel.Url);
-            }
-            else
-                sReturn = "The name given was incorrect. Please try again.";
-
-            return sReturn;
-        }
-
-        /// <summary>
-        /// Performs the chat command requested
-        /// </summary>
-        /// <param name="command">the command to call</param>
-        /// <param name="userId">needed to determine moderator status</param>
-        private void DoChatCommand(string command, string userName)
-        {
-
-            if(moderators.Contains(userName, StringComparer.InvariantCultureIgnoreCase))
-            {
-                if(ChatCommands.IsHelpModCommand(command))
-                {
-                    client.SendMessage(JoinedChannel.Channel, ChatCommands.HelpModCommand());
-                }
-                if (ChatCommands.IsPraise(command.Split(' ')[0]))
-                {
-                    client.SendMessage(JoinedChannel.Channel, PraiseMessage(command.Split(' ')[1]));
-                }
-                else if (ChatCommands.IsRecentFollowers(command))
-                {
-                    client.SendMessage(JoinedChannel.Channel, GetRecentFollowers());
-                }
-                else if (ChatCommands.IsSpecialThanks(command))
-                {
-                    client.SendMessage(JoinedChannel.Channel, ChatCommands.SpecialThanks());
-                }
-            }
-            // all commands not exclusive to channel moderators
-            if (ChatCommands.IsHelpCommand(command))
-            {
-                client.SendMessage(JoinedChannel.Channel, ChatCommands.HelpCommand());
-            }
-            else if (ChatCommands.IsUptime(command))
-            {
-                TimeSpan? time = GetUpTime();
-                if (time != null)
-                    client.SendMessage(JoinedChannel.Channel, string.Format("The channel has been live for {0} hour(s) and {1} minute(s).", time.Value.TotalHours, time.Value.TotalMinutes));
-                else
-                    client.SendMessage(JoinedChannel.Channel, "There was no uptime to find!");
-            }
-            else if (ChatCommands.IsViewers(command))
-            {
-                client.SendMessage(JoinedChannel.Channel, string.Format("{0} viewer(s)", _viewerCount.ToString()));
-            }
-            else if (ChatCommands.IsGetRandomClipCommand(command.Split(' ')[0]))
-            {
-                Random random = new Random((int)DateTime.Now.Ticks);
-                int max = 20;
-                string sUser = string.Empty;
-
-                if (command.Contains(" "))
-                    sUser = command.Split(' ')[1];
-
-                User user = GetUser(sUser);
-
-                if (user != null)
-                {
-                    var clips = twitchAPI.Helix.Clips.GetClipAsync(null, null, user.Id, null, null, max).Result.Clips;
-                    if (clips.Count() > 0)
-                        client.SendMessage(JoinedChannel.Channel, clips[random.Next(max + 1)].Url);
-                    else
-                        client.SendMessage(JoinedChannel.Channel, "That user has no clips of their streams!");
-                }
-                else
-                    client.SendMessage(JoinedChannel.Channel, "A valid Twitch name must be provided...");
-            }
-            else if (ChatCommands.IsFunThingsCardCommand(command))
-            {
-                client.SendMessage(JoinedChannel.Channel, FunThings.IsThisYourCard());
-            }
-            else if (ChatCommands.IsFunThingsDiceCommand(command))
-            {
-                int[] rolls;
-                rolls = FunThings.RollDice();
-                client.SendMessage(JoinedChannel.Channel, string.Format("The dice were cast. As they come to a stop, two numbers appear: {0}, {1}", rolls[0].ToString(), rolls[1].ToString()));              
-
-            }
-            else
-                client.SendMessage(JoinedChannel.Channel, "I can't work under these conditions!");
         }
         #endregion
     }
