@@ -1,0 +1,6 @@
+﻿namespace AlloouBot
+{
+    class OnStartup
+    {
+    }
+}
